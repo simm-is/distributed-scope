@@ -70,7 +70,7 @@ The macro:
 3. **Executes** `(+ x 1)` on the server with `x` bound to `42`
 4. **Returns** the result (`43`) back to the caller
 
-The code block itself is identified by a content hash, so both peers must share the same codebase. Only the *data* travels over the wire, not the code.
+The code block is identified by its source location (line/column), so both peers must share the same codebase. Only the *data* travels over the wire, not the code. This approach handles reader conditionals (`#?(:clj ...)`) correctly since positions are stable even when syntax differs between Clojure and ClojureScript.
 
 ```
    Client                          Server
@@ -184,6 +184,20 @@ For Missionary sequential processes:
 (invoke-on-peer client)
 (<?? S (peer/connect S client "ws://localhost:47291"))
 ```
+
+## Inspiration & Related Work
+
+Inspired by [Electric Clojure](https://github.com/hyperfiddle/electric)'s vision of seamless distributed code. Key differences:
+
+- **À la carte**: No full buy-in to a reactive compiler—integrate where you need it
+- **P2P native**: Built on [kabel](https://github.com/replikativ/kabel) with no server/client distinction; peers can broadcast via pub-sub
+- **Your choice of async**: Supports both `core.async` (widespread) and Missionary (also used by Electric)
+
+Unlike systems that serialize closures (Spark, Flink), distributed-scope only transmits **immutable Clojure values**. Code blocks are identified by source location (line/column), allowing reader conditionals to work correctly across CLJ/CLJS.
+
+**Related systems**: [Unison](https://www.unison-lang.org/) (content-addressed functions), Termite Scheme (distributed continuations), Links/Hop.js (tierless web programming).
+
+**Coming soon**: First-class [Datahike](https://github.com/replikativ/datahike) database references that can travel with scope.
 
 ## Building and Testing
 
