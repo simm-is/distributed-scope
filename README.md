@@ -52,6 +52,12 @@ The explicit `[query filters]` and `[results]` argument lists declare what trave
 - **Cross-platform**: Clojure + ClojureScript with reader conditional support
 - **Two Flavors**: `go-remote` (core.async) or `sp-remote` (Missionary)
 - **Auth Ready**: Works with [kabel-auth](https://github.com/replikativ/kabel-auth) for JWT/principal-based authentication
+- **Hot Reload**: Update code without reconnecting—server via dev namespace (hawk), client via shadow-cljs
+
+## Used By
+
+- **[Datahike](https://github.com/replikativ/datahike)** kabel writer for CLJ/CLJS streaming
+- Internal organizational app (WIP)
 
 ## How It Works
 
