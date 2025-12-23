@@ -1,9 +1,11 @@
 # distributed-scope
 
 <p align="center">
+<a href="https://clojurians.slack.com/archives/C09622F337D"><img src="https://badgen.net/badge/-/slack?icon=slack&label"/></a>
 <a href="https://clojars.org/is.simm/distributed-scope"><img src="https://img.shields.io/clojars/v/is.simm/distributed-scope.svg"/></a>
 <a href="https://circleci.com/gh/simm-is/distributed-scope"><img src="https://circleci.com/gh/simm-is/distributed-scope.svg?style=shield"/></a>
 <a href="https://github.com/simm-is/distributed-scope/tree/main"><img src="https://img.shields.io/github/last-commit/simm-is/distributed-scope/main"/></a>
+<a href="https://cljdoc.org/d/is.simm/distributed-scope"><img src="https://badgen.net/badge/cljdoc/distributed-scope/blue"/></a>
 </p>
 
 A Clojure/ClojureScript library for distributed computation with lexical scope preservation. Execute code seamlessly across multiple peers while maintaining access to variables from the original scope—making distributed programming feel like local programming.
