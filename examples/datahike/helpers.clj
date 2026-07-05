@@ -4,7 +4,7 @@
             [datahike.datom :as dd]
             [datahike.index.persistent-set :as pset])
   (:import [org.fressian.handlers ReadHandler WriteHandler]
-           [me.tonsky.persistent_sorted_set PersistentSortedSet Settings]))
+           [org.replikativ.persistent_sorted_set PersistentSortedSet Settings]))
 
 ;; Store registry - maps store-config to store/storage
 (defonce store-registry (atom {}))
@@ -131,7 +131,7 @@
         (.writeTag writer "datahike.datom.Datom" 1)
         (.writeObject writer (vec (seq datom)))))}
 
-   me.tonsky.persistent_sorted_set.PersistentSortedSet
+   org.replikativ.persistent_sorted_set.PersistentSortedSet
    {"datahike.index.PersistentSortedSet"
     (reify WriteHandler
       (write [_ writer pset]
