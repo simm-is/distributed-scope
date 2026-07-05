@@ -9,7 +9,9 @@
 
 (defn create-test-db! []
   (let [cfg {:store {:backend :file
-                     :path "/tmp/datahike-distributed-test"}
+                     :path "/tmp/datahike-distributed-test"
+                     ;; current datahike/konserve require a stable store :id
+                     :id #uuid "d15c05e0-0000-4000-8000-000000000001"}
              :schema-flexibility :write
              :keep-history? true
              :initial-tx [{:db/ident :name
