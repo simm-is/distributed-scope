@@ -212,58 +212,73 @@
    Also registers the peer in `local-peers` to enable self-invocation detection.
 
    When the invocation message contains :kabel/principal (set by kabel-auth
-   websocket middleware), it is bound to *principal* during function execution."
-  [peer]
-  (let [[_ bus-out] (get-in @peer [:volatile :chans])
-        peer-id (get-in @peer [:id])
+   websocket middleware), it is bound to *principal* during function execution.
+
+   `opts` may carry `:authorize-fn` — (fn [principal fn-name arg-map] -> truthy),
+   the control-plane authorization gate consulted for every NETWORK-inbound
+   invocation before the handler runs. A falsy result short-circuits to a
+   :not-authorized error and the handler never executes. Default permits
+   everything, so distributed-scope stays a generic transport and the app
+   supplies policy (symmetric to kabel.pubsub's :authorize-fn). Self-invocation
+   (`invoke-remote` on a local peer) is NOT gated — it is the process calling
+   its own functions and carries no principal."
+  ([peer] (invoke-on-peer peer {}))
+  ([peer {:keys [authorize-fn] :or {authorize-fn (fn [_principal _fn-name _arg-map] true)}}]
+   (let [[_ bus-out] (get-in @peer [:volatile :chans])
+         peer-id (get-in @peer [:id])
         ;; Register this peer as local for self-invocation detection
-        _ (swap! local-peers conj peer-id)
+         _ (swap! local-peers conj peer-id)
         ;; handle all invocations on the internal bus
-        invoke-ch (chan 1000)
-        _ (sub bus-out ::invoke invoke-ch)]
-    (go-loop-super S []
-                   (let [{:keys [fn-name arg-map scope request-id request-scope] :as msg} (<? S invoke-ch)]
-                     (when msg
-                       (let [principal (:kabel/principal msg)]
-                         (tel/log! {:level :debug
-                                    :id ::invoke-on-peer-invoke
-                                    :msg "remote invocation request received"
-                                    :data {:msg (dissoc msg :kabel/principal) ;; don't log full principal
-                                           :scope scope
-                                           :peer-id peer-id
-                                           :has-principal (some? principal)}})
-                         (when (= scope peer-id)
-                           (go-super S
+         invoke-ch (chan 1000)
+         _ (sub bus-out ::invoke invoke-ch)]
+     (go-loop-super S []
+                    (let [{:keys [fn-name arg-map scope request-id request-scope] :as msg} (<? S invoke-ch)]
+                      (when msg
+                        (let [principal (:kabel/principal msg)]
+                          (tel/log! {:level :debug
+                                     :id ::invoke-on-peer-invoke
+                                     :msg "remote invocation request received"
+                                     :data {:msg (dissoc msg :kabel/principal) ;; don't log full principal
+                                            :scope scope
+                                            :peer-id peer-id
+                                            :has-principal (some? principal)}})
+                          (when (= scope peer-id)
+                            (go-super S
                                      ;; Bind *principal* for the duration of the function call
                                      ;; Note: In CLJ, this binding persists through the go block.
                                      ;; In CLJS, user code should capture *principal* immediately.
-                                     (let [res (binding [*principal* principal]
-                                                 (try
-                                                   (if-let [f (get @remote-fn-registry fn-name)]
-                                                     (<? S (f arg-map))
-                                                     (throw (ex-info "Remote function not found" {:fn-name fn-name})))
-                                                   (catch #?(:clj Throwable :cljs :default) e e)))
-                                           response {:type ::invoke-result
-                                                     :scope request-scope
-                                                     :request-id request-id}
-                                           response (if (throwable? res)
-                                                      (assoc response :error (pr-str res))
-                                                      (assoc response :result res))
+                                      (let [res (binding [*principal* principal]
+                                                  (try
+                                                   ;; Control-plane authorization gate. Consulted before
+                                                   ;; the handler runs; a denial never executes it.
+                                                    (if-not (authorize-fn principal fn-name arg-map)
+                                                      (throw (ex-info "Not authorized"
+                                                                      {:type :not-authorized :fn-name fn-name}))
+                                                      (if-let [f (get @remote-fn-registry fn-name)]
+                                                        (<? S (f arg-map))
+                                                        (throw (ex-info "Remote function not found" {:fn-name fn-name}))))
+                                                    (catch #?(:clj Throwable :cljs :default) e e)))
+                                            response {:type ::invoke-result
+                                                      :scope request-scope
+                                                      :request-id request-id}
+                                            response (if (throwable? res)
+                                                       (assoc response :error (pr-str res))
+                                                       (assoc response :result res))
                                            ;; Look up direct connection to requesting peer from global registry
-                                           {:keys [out]} (get @connections request-scope)]
-                                       (tel/log! {:level :debug
-                                                  :id ::invoke-on-peer-invoke-result-send
-                                                  :msg "sending invocation result to requesting peer"
-                                                  :data {:response response
-                                                         :request-scope request-scope
-                                                         :peer-id peer-id}})
-                                       (when-not out
-                                         (throw (ex-info "Cannot send response: no connection to requesting peer"
-                                                         {:request-scope request-scope
-                                                          :available-connections (keys @connections)})))
+                                            {:keys [out]} (get @connections request-scope)]
+                                        (tel/log! {:level :debug
+                                                   :id ::invoke-on-peer-invoke-result-send
+                                                   :msg "sending invocation result to requesting peer"
+                                                   :data {:response response
+                                                          :request-scope request-scope
+                                                          :peer-id peer-id}})
+                                        (when-not out
+                                          (throw (ex-info "Cannot send response: no connection to requesting peer"
+                                                          {:request-scope request-scope
+                                                           :available-connections (keys @connections)})))
                                        ;; Direct routing: send response directly to the requesting peer's connection
-                                       (>? S out response)))))
-                       (recur))))))
+                                        (>? S out response)))))
+                        (recur)))))))
 
 (defn invoke-remote [remote-scope fn-name arg-map]
   ;; Returns a go-channel that will contain the result
