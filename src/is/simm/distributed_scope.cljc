@@ -78,8 +78,9 @@
   "A middleware that forwards invocation messages to the remote peer
    and receives invocation messages from the remote peer.
 
-   Also stores a direct connection mapping {remote-peer-id -> out-channel}
-   in the peer's :volatile :connections for direct response routing."
+   Registers {remote-peer-id -> {:peer ...}} in the global `connections` atom for
+   OUTBOUND routing (invoke-remote), and tags each inbound ::invoke with a
+   ::reply-out channel so the processor can reply on the request's own connection."
   [[S peer [in out]]]
   (let [new-in (chan 1000)
         p-in (pub in (fn [{:keys [type]}]
@@ -104,7 +105,16 @@
         _ (go-loop-super S []
                          (let [msg (<? S bus-in-wrapper)]
                            (when msg
-                             (>? S bus-in msg)
+                             ;; Carry the reply channel WITH the request. An inbound ::invoke
+                             ;; arrived on THIS connection, so `out` is the route back to the
+                             ;; requester. The invoke processor replies on this channel instead
+                             ;; of re-deriving it from the `connections` registry — which removes
+                             ;; the ::register-scope/::invoke ordering race (#2) by construction:
+                             ;; every invoke that reaches the processor necessarily passed through
+                             ;; here first, so its reply route is always present.
+                             (>? S bus-in (if (= (:type msg) ::invoke)
+                                            (assoc msg ::reply-out out)
+                                            msg))
                              (recur))))
         _ (sub p-in ::invoke bus-in-wrapper)
         ;; Route incoming invoke-results directly to the local response handlers
@@ -126,7 +136,10 @@
                            :remote-scope remote-scope}})
          ;; Store the connection in the global registry
          ;; This allows invoke-remote to find the right peer for any target
-         (swap! connections assoc remote-scope {:peer peer :out out})
+         ;; Send-side registry only: `invoke-remote` looks up `:peer` here to
+         ;; route an OUTBOUND invoke (gated by connection-promises). Replies no
+         ;; longer use this — they ride the ::reply-out channel on the request.
+         (swap! connections assoc remote-scope {:peer peer})
          ;; Deliver on promise so invoke-remote knows connection is ready
          (when-let [promise-ch (get @connection-promises remote-scope)]
            (put! promise-ch :ready)
@@ -206,8 +219,9 @@
 (defn invoke-on-peer
   "Sets up the system to be able to invoke remote functions on the given peer.
 
-   Responses are sent directly to the requesting peer via the global
-   connections registry.
+   Responses are sent directly back on the channel the request arrived on
+   (carried as ::reply-out), so reply routing never depends on the requester's
+   ::register-scope having been processed first.
 
    Also registers the peer in `local-peers` to enable self-invocation detection.
 
@@ -264,20 +278,22 @@
                                             response (if (throwable? res)
                                                        (assoc response :error (pr-str res))
                                                        (assoc response :result res))
-                                           ;; Look up direct connection to requesting peer from global registry
-                                            {:keys [out]} (get @connections request-scope)]
+                                           ;; Reply on the channel the request arrived on (carried as
+                                           ;; ::reply-out by the connection middleware). No connections
+                                           ;; lookup, so no dependency on the requester's ::register-scope
+                                           ;; having been processed yet — this is the fix for #2.
+                                            reply-out (::reply-out msg)]
                                         (tel/log! {:level :debug
                                                    :id ::invoke-on-peer-invoke-result-send
                                                    :msg "sending invocation result to requesting peer"
                                                    :data {:response response
                                                           :request-scope request-scope
                                                           :peer-id peer-id}})
-                                        (when-not out
-                                          (throw (ex-info "Cannot send response: no connection to requesting peer"
-                                                          {:request-scope request-scope
-                                                           :available-connections (keys @connections)})))
-                                       ;; Direct routing: send response directly to the requesting peer's connection
-                                        (>? S out response)))))
+                                        (when-not reply-out
+                                          (throw (ex-info "Cannot send response: invoke carried no reply channel"
+                                                          {:request-scope request-scope})))
+                                       ;; Direct routing: reply straight back on the request's connection.
+                                        (>? S reply-out response)))))
                         (recur)))))))
 
 (defn invoke-remote [remote-scope fn-name arg-map]
