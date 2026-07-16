@@ -266,8 +266,16 @@
                                                    ;; Control-plane authorization gate. Consulted before
                                                    ;; the handler runs; a denial never executes it.
                                                     (if-not (authorize-fn principal fn-name arg-map)
-                                                      (throw (ex-info "Not authorized"
-                                                                      {:type :not-authorized :fn-name fn-name}))
+                                                      ;; Distinguish the two denial causes so the client can
+                                                      ;; react correctly: NO principal ⇒ the socket is
+                                                      ;; anonymous (expired/absent token) ⇒ re-authenticate;
+                                                      ;; principal present but denied ⇒ genuinely forbidden ⇒
+                                                      ;; surface an error, do NOT drop the session.
+                                                      (if principal
+                                                        (throw (ex-info "Not authorized"
+                                                                        {:type :not-authorized :fn-name fn-name}))
+                                                        (throw (ex-info "Authentication required"
+                                                                        {:type :authentication-required :fn-name fn-name})))
                                                       (if-let [f (get @remote-fn-registry fn-name)]
                                                         (<? S (f arg-map))
                                                         (throw (ex-info "Remote function not found" {:fn-name fn-name}))))
