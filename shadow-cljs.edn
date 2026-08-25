@@ -1,7 +1,5 @@
 {:deps {:aliases [:shadow-cljs]}
 
- :source-paths ["src" "test"]
-
  :dev-http {8080 "resources/public"}
 
  :builds
@@ -16,4 +14,8 @@
   :browser-ci
   {:target :karma
    :output-to "target/browser-test/test.js"
-   :ns-regexp "browser-integration-test$"}}}
+   :ns-regexp "browser-integration-test$"
+   :compiler-options {:warnings-as-errors true
+                      ;; core.async emits terminal expressions in generated
+                      ;; state machines that Closure reports as useless code.
+                      :closure-warnings {:useless-code :off}}}}}

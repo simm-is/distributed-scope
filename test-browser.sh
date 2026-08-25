@@ -49,7 +49,7 @@ echo "[test-browser.sh] Server is running (PID: $SERVER_PID)"
 
 # Compile ClojureScript tests
 echo "[test-browser.sh] Compiling ClojureScript tests..."
-npx shadow-cljs compile browser-ci
+npx shadow-cljs release browser-ci
 
 # Run Karma tests
 echo "[test-browser.sh] Running Karma tests..."
