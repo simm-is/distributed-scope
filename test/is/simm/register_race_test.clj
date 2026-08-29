@@ -52,9 +52,8 @@
         (try
           (<!! (peer/start server))
           (ds/invoke-on-peer server)
-          (swap! ds/local-peers disj server-id) ;; same JVM: don't self-short-circuit the invoke
           (<!! (ds/connect-distributed-scope S client url))
-          (let [result-ch (ds/invoke-remote server-id 'race/ping {})
+          (let [result-ch (ds/invoke-remote server-id 'race/ping {} {:force-remote? true})
                 [value chosen] (alts!! [result-ch (timeout 3000)])]
             (is (= result-ch chosen) "invoke replied before the 3s timeout (reply not lost)")
             (is (= {:ok true} value) "reply routed back despite the delayed ::register-scope"))
