@@ -2,14 +2,14 @@
   (:require #?(:clj [clojure.tools.analyzer.jvm :as ana.jvm])
             #?(:clj [cljs.analyzer :as ana.js])
             [hasch.core :refer [uuid]]
-            [superv.async :refer [S put? #?@(:clj [go-super go-loop-super <? >? go-try go-loop-try])]]
+            [superv.async :refer [S put? #?@(:clj [go-super go-loop-super <? >? go-try go-loop-try on-abort])]]
             [clojure.core.async :refer [chan pub sub unsub close! put! take! <! #?(:clj go-loop)]]
             [taoensso.telemere :as tel :include-macros true]
             [clojure.walk :as walk]
             [missionary.core :as m]
             [kabel.peer :as peer]
             [clojure.set :as set])
-  #?(:cljs (:require-macros [superv.async :refer [go-super go-loop-super go-try <? >? go-loop-try]]
+  #?(:cljs (:require-macros [superv.async :refer [go-super go-loop-super go-try <? >? go-loop-try on-abort]]
                             [clojure.core.async :refer [go go-loop]])))
 
 ;; Global connection registry: {remote-peer-id -> {:peer peer-atom :out out-channel}}
@@ -47,11 +47,18 @@
 ;; Used by invoke-remote to wait for a connection to be established before giving up.
 (def connection-promises (atom {}))
 
-;; Local peers registry: #{peer-id}
-;; Tracks all peer IDs on this process for detecting self-invocation.
-;; When invoke-remote targets a local peer, we call the function directly
-;; instead of waiting for a network connection that doesn't exist.
-(def local-peers (atom #{}))
+;; One stable invocation router and one active owner per local peer. Keeping
+;; both in one atom makes replacement and teardown generation-safe.
+(defonce ^:private invocation-owners (atom {}))
+
+;; Read-only compatibility view used for detecting self-invocation. Deriving it
+;; from invocation-owners avoids a second mutable registry drifting during a
+;; concurrent session handoff.
+(def local-peers
+  #?(:clj (reify clojure.lang.IDeref
+            (deref [_] (set (keys @invocation-owners))))
+     :cljs (reify IDeref
+             (-deref [_] (set (keys @invocation-owners))))))
 
 #?(:clj
    (defn free-variables [env body]
@@ -216,6 +223,70 @@
 (defn unregister-remote-fn! [fn-name]
   (swap! remote-fn-registry dissoc fn-name))
 
+(defn- dispatch-invocation! [peer-id router-id msg]
+  (when-let [{:keys [supervisor authorize-fn]} (get @invocation-owners peer-id)]
+    (let [{:keys [fn-name arg-map scope request-id request-scope]} msg
+          principal (:kabel/principal msg)]
+      (tel/log! {:level :debug
+                 :id ::invoke-on-peer-invoke
+                 :msg "remote invocation request received"
+                 :data {:msg (dissoc msg :kabel/principal)
+                        :scope scope
+                        :peer-id peer-id
+                        :has-principal (some? principal)}})
+      (when (and (= scope peer-id)
+                 (= router-id (get-in @invocation-owners [peer-id :router-id])))
+        (go-try supervisor
+          ;; Bind *principal* for the duration of the function call. In CLJS,
+          ;; user code should capture it immediately before crossing async APIs.
+                (let [res (binding [*principal* principal]
+                            (try
+                              (if-not (authorize-fn principal fn-name arg-map)
+                                (if principal
+                                  (throw (ex-info "Not authorized"
+                                                  {:type :not-authorized :fn-name fn-name}))
+                                  (throw (ex-info "Authentication required"
+                                                  {:type :authentication-required :fn-name fn-name})))
+                                (if-let [f (get @remote-fn-registry fn-name)]
+                                  (<? supervisor (f arg-map))
+                                  (throw (ex-info "Remote function not found"
+                                                  {:fn-name fn-name}))))
+                              (catch #?(:clj Throwable :cljs :default) e e)))
+                      response (cond-> {:type ::invoke-result
+                                        :scope request-scope
+                                        :request-id request-id}
+                                 (throwable? res) (assoc :error (pr-str res))
+                                 (not (throwable? res)) (assoc :result res))
+                ;; Every inbound invoke carries its reply route, avoiding a
+                ;; dependency on ::register-scope message ordering.
+                      reply-out (::reply-out msg)]
+                  (tel/log! {:level :debug
+                             :id ::invoke-on-peer-invoke-result-send
+                             :msg "sending invocation result to requesting peer"
+                             :data {:response response
+                                    :request-scope request-scope
+                                    :peer-id peer-id}})
+                  (when-not reply-out
+                    (throw (ex-info "Cannot send response: invoke carried no reply channel"
+                                    {:request-scope request-scope})))
+                  (>? supervisor reply-out response)))))))
+
+(defn- start-invocation-router! [peer-id router-id invoke-ch]
+  ;; The router is stable across session replacement. It contains no session
+  ;; policy or supervisor state; each delivery snapshots the current owner.
+  (go-loop []
+    (if-let [msg (<! invoke-ch)]
+      (do
+        (dispatch-invocation! peer-id router-id msg)
+        (recur))
+      ;; A closed peer bus closes its pub subscriptions. Retire this router only
+      ;; if it is still current; a replacement already points elsewhere.
+      (swap! invocation-owners
+             (fn [owners]
+               (if (= router-id (get-in owners [peer-id :router-id]))
+                 (dissoc owners peer-id)
+                 owners))))))
+
 (defn invoke-on-peer
   "Sets up the system to be able to invoke remote functions on the given peer.
 
@@ -223,12 +294,16 @@
    (carried as ::reply-out), so reply routing never depends on the requester's
    ::register-scope having been processed first.
 
-   Also registers the peer in `local-peers` to enable self-invocation detection.
+   Also makes the peer visible through `local-peers` for self-invocation.
 
    When the invocation message contains :kabel/principal (set by kabel-auth
    websocket middleware), it is bound to *principal* during function execution.
 
-   `opts` may carry `:authorize-fn` — (fn [principal fn-name arg-map] -> truthy),
+   `opts` may carry:
+   - `:supervisor` — lifecycle owner for this invocation generation. Defaults
+     to the process supervisor for compatibility. Aborting the current owner
+     closes the stable per-peer router and removes the peer from `local-peers`.
+   - `:authorize-fn` — (fn [principal fn-name arg-map] -> truthy),
    the control-plane authorization gate consulted for every NETWORK-inbound
    invocation before the handler runs. A falsy result short-circuits to a
    :not-authorized error and the handler never executes. Default permits
@@ -237,143 +312,140 @@
    (`invoke-remote` on a local peer) is NOT gated — it is the process calling
    its own functions and carries no principal."
   ([peer] (invoke-on-peer peer {}))
-  ([peer {:keys [authorize-fn] :or {authorize-fn (fn [_principal _fn-name _arg-map] true)}}]
+  ([peer {:keys [authorize-fn supervisor]
+          :or {authorize-fn (fn [_principal _fn-name _arg-map] true)
+               supervisor S}}]
    (let [[_ bus-out] (get-in @peer [:volatile :chans])
          peer-id (get-in @peer [:id])
-        ;; Register this peer as local for self-invocation detection
-         _ (swap! local-peers conj peer-id)
-        ;; handle all invocations on the internal bus
-         invoke-ch (chan 1000)
-         _ (sub bus-out ::invoke invoke-ch)]
-     (go-loop-super S []
-                    (let [{:keys [fn-name arg-map scope request-id request-scope] :as msg} (<? S invoke-ch)]
-                      (when msg
-                        (let [principal (:kabel/principal msg)]
-                          (tel/log! {:level :debug
-                                     :id ::invoke-on-peer-invoke
-                                     :msg "remote invocation request received"
-                                     :data {:msg (dissoc msg :kabel/principal) ;; don't log full principal
-                                            :scope scope
-                                            :peer-id peer-id
-                                            :has-principal (some? principal)}})
-                          (when (= scope peer-id)
-                            (go-super S
-                                     ;; Bind *principal* for the duration of the function call
-                                     ;; Note: In CLJ, this binding persists through the go block.
-                                     ;; In CLJS, user code should capture *principal* immediately.
-                                      (let [res (binding [*principal* principal]
-                                                  (try
-                                                   ;; Control-plane authorization gate. Consulted before
-                                                   ;; the handler runs; a denial never executes it.
-                                                    (if-not (authorize-fn principal fn-name arg-map)
-                                                      ;; Distinguish the two denial causes so the client can
-                                                      ;; react correctly: NO principal ⇒ the socket is
-                                                      ;; anonymous (expired/absent token) ⇒ re-authenticate;
-                                                      ;; principal present but denied ⇒ genuinely forbidden ⇒
-                                                      ;; surface an error, do NOT drop the session.
-                                                      (if principal
-                                                        (throw (ex-info "Not authorized"
-                                                                        {:type :not-authorized :fn-name fn-name}))
-                                                        (throw (ex-info "Authentication required"
-                                                                        {:type :authentication-required :fn-name fn-name})))
-                                                      (if-let [f (get @remote-fn-registry fn-name)]
-                                                        (<? S (f arg-map))
-                                                        (throw (ex-info "Remote function not found" {:fn-name fn-name}))))
-                                                    (catch #?(:clj Throwable :cljs :default) e e)))
-                                            response {:type ::invoke-result
-                                                      :scope request-scope
-                                                      :request-id request-id}
-                                            response (if (throwable? res)
-                                                       (assoc response :error (pr-str res))
-                                                       (assoc response :result res))
-                                           ;; Reply on the channel the request arrived on (carried as
-                                           ;; ::reply-out by the connection middleware). No connections
-                                           ;; lookup, so no dependency on the requester's ::register-scope
-                                           ;; having been processed yet — this is the fix for #2.
-                                            reply-out (::reply-out msg)]
-                                        (tel/log! {:level :debug
-                                                   :id ::invoke-on-peer-invoke-result-send
-                                                   :msg "sending invocation result to requesting peer"
-                                                   :data {:response response
-                                                          :request-scope request-scope
-                                                          :peer-id peer-id}})
-                                        (when-not reply-out
-                                          (throw (ex-info "Cannot send response: invoke carried no reply channel"
-                                                          {:request-scope request-scope})))
-                                       ;; Direct routing: reply straight back on the request's connection.
-                                        (>? S reply-out response)))))
-                        (recur)))))))
+         token (random-uuid)
+         router-id (random-uuid)
+         candidate-ch (chan 1000)
+         candidate-started? (atom false)
+         candidate-cleaned? (atom false)
+         candidate-router {:router-id router-id
+                           :invoke-ch candidate-ch
+                           :started? candidate-started?
+                           :bus-out bus-out
+                           :cleanup-router! (fn []
+                                              (when (compare-and-set! candidate-cleaned? false true)
+                                                (unsub bus-out ::invoke candidate-ch)
+                                                (close! candidate-ch)))}
+         ;; Subscribe the candidate before the atomic owner switch. Its bounded
+         ;; channel buffers deliveries until it wins and its router starts.
+         _ (sub bus-out ::invoke candidate-ch)
+         [before after]
+         (swap-vals! invocation-owners
+                     (fn [owners]
+                       (let [current (get owners peer-id)
+                             router (if (and current (identical? bus-out (:bus-out current)))
+                                      (select-keys current
+                                                   [:router-id :invoke-ch :started? :bus-out :cleanup-router!])
+                                      candidate-router)]
+                         (assoc owners peer-id
+                                (merge router
+                                       {:token token
+                                        :supervisor supervisor
+                                        :authorize-fn authorize-fn})))))
+         previous (get before peer-id)
+         {:keys [router-id invoke-ch started? cleanup-router!]} (get after peer-id)
+         candidate-active? (= router-id (:router-id candidate-router))
+         _ (when-not candidate-active?
+             ((:cleanup-router! candidate-router)))
+         _ (when (compare-and-set! started? false true)
+             (start-invocation-router! peer-id router-id invoke-ch))
+         _ (when (and previous
+                      (not= (:router-id previous) router-id))
+             ((:cleanup-router! previous)))
+         cleanup! (fn []
+                    (let [[before _]
+                          (swap-vals! invocation-owners
+                                      (fn [owners]
+                                        (if (= token (get-in owners [peer-id :token]))
+                                          (dissoc owners peer-id)
+                                          owners)))
+                          owner (get before peer-id)]
+                      (when (= token (:token owner))
+                        (cleanup-router!))))]
+     (on-abort supervisor
+               (cleanup!)))))
 
-(defn invoke-remote [remote-scope fn-name arg-map]
-  ;; Returns a go-channel that will contain the result
-  (go-try S
+(defn invoke-remote
+  "Invoke a registered function in `remote-scope`.
+
+   Local scopes normally execute directly. Pass `{:force-remote? true}` to the
+   four-argument form when the network route itself must be exercised."
+  ([remote-scope fn-name arg-map]
+   (invoke-remote remote-scope fn-name arg-map {}))
+  ([remote-scope fn-name arg-map {:keys [force-remote?]}]
+   ;; Returns a go-channel that will contain the result
+   (go-try S
     ;; Check for self-invocation (calling a function on this same process)
-          (if (contains? @local-peers remote-scope)
+           (if (and (not force-remote?) (contains? @local-peers remote-scope))
       ;; Local call - execute directly without network round-trip
-            (if-let [f (get @remote-fn-registry fn-name)]
-              (<? S (f arg-map))
-              (throw (ex-info "Remote function not found" {:fn-name fn-name})))
+             (if-let [f (get @remote-fn-registry fn-name)]
+               (<? S (f arg-map))
+               (throw (ex-info "Remote function not found" {:fn-name fn-name})))
       ;; Remote call - send over the network
-            (do
+             (do
         ;; Wait for connection if not immediately available
-              (when-not (get @connections remote-scope)
-                (tel/log! {:level :debug
-                           :id ::invoke-remote-waiting
-                           :msg "Connection not ready, waiting for handshake"
-                           :data {:remote-scope remote-scope}})
+               (when-not (get @connections remote-scope)
+                 (tel/log! {:level :debug
+                            :id ::invoke-remote-waiting
+                            :msg "Connection not ready, waiting for handshake"
+                            :data {:remote-scope remote-scope}})
           ;; Create promise channel if doesn't exist
-                (let [promise-ch (or (get @connection-promises remote-scope)
-                                     (let [ch (chan 1)]
-                                       (swap! connection-promises assoc remote-scope ch)
-                                       ch))]
+                 (let [promise-ch (or (get @connection-promises remote-scope)
+                                      (let [ch (chan 1)]
+                                        (swap! connection-promises assoc remote-scope ch)
+                                        ch))]
             ;; Wait for the ready signal
-                  (<? S promise-ch)))
+                   (<? S promise-ch)))
         ;; Now look up the connection
-              (let [{:keys [peer]} (get @connections remote-scope)
-                    _ (when-not peer
-                        (throw (ex-info "Not connected to remote peer"
-                                        {:remote-scope remote-scope
-                                         :available-connections (keys @connections)})))
-                    client-scope (:id @peer)
-                    [bus-in bus-out] (get-in @peer [:volatile :chans])
-                    response-ch (chan)
-                    _ (sub bus-out ::invoke-result response-ch)
-                    rid (uuid)
-                    msg {:type ::invoke
-                         :scope remote-scope
-                         :request-scope client-scope
-                         :fn-name fn-name
-                         :arg-map arg-map
-                         :request-id rid}]
-                (tel/log! {:level :debug
-                           :id ::invoke-remote-send
-                           :msg "Sending remote invocation"
-                           :data {:scope remote-scope
-                                  :fn-name fn-name
-                                  :client-scope client-scope
-                                  :request-id rid}})
+               (let [{:keys [peer]} (get @connections remote-scope)
+                     _ (when-not peer
+                         (throw (ex-info "Not connected to remote peer"
+                                         {:remote-scope remote-scope
+                                          :available-connections (keys @connections)})))
+                     client-scope (:id @peer)
+                     [bus-in bus-out] (get-in @peer [:volatile :chans])
+                     response-ch (chan)
+                     _ (sub bus-out ::invoke-result response-ch)
+                     rid (uuid)
+                     msg {:type ::invoke
+                          :scope remote-scope
+                          :request-scope client-scope
+                          :fn-name fn-name
+                          :arg-map arg-map
+                          :request-id rid}]
+                 (tel/log! {:level :debug
+                            :id ::invoke-remote-send
+                            :msg "Sending remote invocation"
+                            :data {:scope remote-scope
+                                   :fn-name fn-name
+                                   :client-scope client-scope
+                                   :request-id rid}})
           ;; send a request
-                (put? S bus-in msg)
+                 (put? S bus-in msg)
           ;; wait for the result
-                (loop []
-                  (let [{:keys [request-id result error] :as msg} (<? S response-ch)]
-                    (tel/log! {:level :debug
-                               :id ::invoke-remote-received
-                               :msg "Received response"
-                               :data {:msg msg
-                                      :request-id request-id
-                                      :rid rid
-                                      :error error
-                                      :result result}})
-                    (when msg
-                      (if (= request-id rid)
-                        (do
-                          (unsub bus-out ::invoke-result response-ch)
-                          (close! response-ch)
-                          (if error
-                            (throw (ex-info "Remote invocation error" {:error error}))
-                            result))
-                        (recur))))))))))
+                 (loop []
+                   (let [{:keys [request-id result error] :as msg} (<? S response-ch)]
+                     (tel/log! {:level :debug
+                                :id ::invoke-remote-received
+                                :msg "Received response"
+                                :data {:msg msg
+                                       :request-id request-id
+                                       :rid rid
+                                       :error error
+                                       :result result}})
+                     (when msg
+                       (if (= request-id rid)
+                         (do
+                           (unsub bus-out ::invoke-result response-ch)
+                           (close! response-ch)
+                           (if error
+                             (throw (ex-info "Remote invocation error" {:error error}))
+                             result))
+                         (recur)))))))))))
 
 ;; core.async API
 
