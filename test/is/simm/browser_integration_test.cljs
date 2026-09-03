@@ -3,8 +3,8 @@
   (:require [cljs.test :refer [deftest is testing async]]
             [clojure.core.async :refer [<! timeout alts!] :refer-macros [go]]
             [is.simm.distributed-scope :refer [remote-middleware invoke-on-peer
-                                               connect-distributed-scope
-                                               connections]]
+                                               connect-distributed-scope]]
+            [kabel.remote :as remote]
             [simple.demo :refer [demo]]
             [simple.demo-sp :refer [demo-sp]]
             [kabel.peer :as peer]
@@ -47,7 +47,7 @@
       (js/console.log "[TEST] Connecting to server at" test-server-url)
       (<! (connect-distributed-scope S @client-atom test-server-url))
       (reset! connected? true)
-      (js/console.log "[TEST] Connected! Connections count:" (count @connections)))
+      (js/console.log "[TEST] Connected! Connections count:" (count @remote/routes)))
     :ready))
 
 ;; =============================================================================

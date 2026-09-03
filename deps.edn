@@ -1,22 +1,28 @@
-{:paths ["src" "resources"]
+{:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.clojure/clojurescript {:mvn/version "1.11.132"}
-        thheller/shadow-cljs {:mvn/version "2.28.21"}
-        org.replikativ/hasch {:mvn/version "0.4.99"}
-        riddley/riddley {:mvn/version "0.2.0"}
-        org.replikativ/kabel {:mvn/version "0.3.98"}
-        ;; required directly (logging) — was riding in transitively pre-migration
+        ;; The remote-invocation runtime (kabel.remote), transport and codecs.
+        org.replikativ/kabel {:mvn/version "0.3.128"}
+        org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.taoensso/telemere {:mvn/version "1.2.1"}
         missionary/missionary {:mvn/version "b.46"}
-        org.clojure/tools.analyzer.jvm {:mvn/version "1.3.2"}
-        org.clojure/tools.namespace {:mvn/version "1.5.0"}
-        hawk/hawk {:mvn/version "0.2.11"}}
+        ;; Macro-time free-variable analysis. The ClojureScript analyzer is
+        ;; resolved at expansion time from the consumer's cljs build, so
+        ;; ClojureScript is not a dependency of this library.
+        org.clojure/tools.analyzer.jvm {:mvn/version "1.3.2"}}
  :aliases
  {:build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
                  slipset/deps-deploy {:mvn/version "0.2.2"}}
           :ns-default build}
+  ;; Development only: the ClojureScript toolchain and the hot-reload watcher
+  ;; (`is.simm.dev.watch`, under dev/). None of it ships in the artifact.
+  :dev {:extra-paths ["dev" "examples" "resources"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
+                     thheller/shadow-cljs {:mvn/version "2.28.21"}
+                     org.clojure/tools.namespace {:mvn/version "1.5.0"}
+                     hawk/hawk {:mvn/version "0.2.11"}}}
   :test {:extra-paths ["test" "examples"]
          :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}
+                      org.replikativ/hasch {:mvn/version "0.4.99"}
                       org.replikativ/datahike {:git/url "https://github.com/replikativ/datahike.git"
                                                :git/sha "e79817604e70793186a885b54c77b9af3570963f"}
                       io.github.cognitect-labs/test-runner
@@ -26,16 +32,13 @@
          :main-opts ["-m" "cognitect.test-runner" "-d" "test"]}
   :datahike-example {:extra-paths ["test" "examples"]
                      :extra-deps {org.replikativ/datahike {:git/url "https://github.com/replikativ/datahike.git"
-                                                  :git/sha "e79817604e70793186a885b54c77b9af3570963f"}}}
-  :dev {:extra-paths ["dev" "examples"]}
-
-  :browser-server {:extra-paths ["test" "examples"]
+                                                           :git/sha "e79817604e70793186a885b54c77b9af3570963f"}}}
+  :browser-server {:extra-paths ["test" "examples" "resources"]
                    :main-opts ["-m" "is.simm.browser-test-server"]}
-
-  :shadow-cljs {:extra-paths ["test" "examples"]}
-
+  :shadow-cljs {:extra-paths ["test" "examples" "resources"]
+                :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
+                             thheller/shadow-cljs {:mvn/version "2.28.21"}}}
   :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
            :main-opts ["-m" "cljfmt.main" "check"]}
-
   :ffix {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
          :main-opts ["-m" "cljfmt.main" "fix"]}}}

@@ -51,8 +51,8 @@ The explicit `[query filters]` and `[results]` argument lists declare what trave
 - **Bidirectional**: Hop between any connected peers (server→client→server→...)
 - **Cross-platform**: Clojure + ClojureScript with reader conditional support
 - **Two Flavors**: `go-remote` (core.async) or `sp-remote` (Missionary)
-- **Auth Ready**: Works with [kabel-auth](https://github.com/replikativ/kabel-auth) for JWT/principal-based authentication
-- **Hot Reload**: Update code without reconnecting—server via dev namespace (hawk), client via shadow-cljs
+- **Auth Ready**: Works with kabel's `kabel.auth.websocket` for JWT/principal-based authentication; the caller's principal is bound to `*principal*` inside a remote body
+- **Hot Reload**: Update code without reconnecting—server via the `is.simm.dev.watch` namespace (under the `:dev` alias), client via shadow-cljs
 
 ## Used By
 
@@ -168,6 +168,13 @@ For Missionary sequential processes:
 
 ## Setting Up Peers
 
+The runtime underneath the macros is [`kabel.remote`](https://github.com/replikativ/kabel/blob/main/doc/remote-invocation.md):
+connection middleware, function registry, authorization gate, and the
+request/response protocol. distributed-scope keeps thin wrappers for the
+functions it used to define (`remote-middleware`, `invoke-on-peer`,
+`invoke-remote`, `register-remote-fn!`, `connect-distributed-scope`), so
+existing code keeps working; new code may use `kabel.remote` directly.
+
 ### Server
 
 ```clojure
@@ -177,8 +184,9 @@ For Missionary sequential processes:
 (def server-id #uuid "05a06e85-e7ca-4213-9fe5-04ae511e50a0")
 (def server (peer/server-peer S handler server-id remote-middleware identity))
 
-(invoke-on-peer server)
-(<?? S (peer/start server))
+;; :authorize gates every inbound invocation, in the kabel.authorize shape
+(invoke-on-peer server {:authorize (fn [{:keys [principal fn-name arg-map]}] (some? principal))})
+(go-try S (<? S (peer/start server)))
 ```
 
 ### Client
@@ -188,8 +196,14 @@ For Missionary sequential processes:
 (def client (peer/client-peer S client-id remote-middleware identity))
 
 (invoke-on-peer client)
-(<?? S (peer/connect S client "ws://localhost:47291"))
+(go-try S (<? S (connect-distributed-scope S client "ws://localhost:47291")))
+
+;; or keep the client connected across drops, with backoff and status events
+(peer/maintain S client "ws://localhost:47291" {:on-status println})
 ```
+
+A remote hop issued while the connection is down waits for it; one in flight
+when the connection drops fails with `:kabel.remote/disconnected`.
 
 ## Inspiration & Related Work
 
@@ -214,6 +228,10 @@ clojure -X:test
 # Run browser integration tests (requires Chrome)
 npm install
 ./test-browser.sh
+
+# Hot reload during development (hawk watcher, not part of the artifact)
+clojure -A:dev
+# (require 'is.simm.dev.watch)
 
 # Build JAR
 clojure -T:build jar
