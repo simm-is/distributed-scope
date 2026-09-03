@@ -7,7 +7,7 @@ change log follows the conventions of [keepachangelog.com](http://keepachangelog
 ### Changed
 - The runtime — connection middleware, function registry, authorization gate,
   request/response over a kabel connection — is now `kabel.remote` (kabel
-  0.3.127). `remote-middleware`, `invoke-on-peer`, `invoke-remote`,
+  0.3.128). `remote-middleware`, `invoke-on-peer`, `invoke-remote`,
   `register-remote-fn!`, `connect-distributed-scope`, `*principal*`,
   `current-principal` and `require-principal` remain as thin wrappers, so
   existing code keeps working. The wire protocol is specified in kabel's

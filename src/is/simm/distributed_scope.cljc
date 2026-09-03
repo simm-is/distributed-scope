@@ -6,7 +6,7 @@
 
    The runtime underneath — connection middleware, function registry,
    authorization gate, request/response over a kabel connection — is
-   `kabel.remote` since kabel 0.3.127. The functions this namespace used to
+   `kabel.remote` since kabel 0.3.128. The functions this namespace used to
    define for it (`remote-middleware`, `invoke-on-peer`, `invoke-remote`,
    `register-remote-fn!`, `connect-distributed-scope`, `*principal*`) remain
    here as thin wrappers so existing code keeps working; new code may use

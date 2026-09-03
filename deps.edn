@@ -1,7 +1,7 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         ;; The remote-invocation runtime (kabel.remote), transport and codecs.
-        org.replikativ/kabel {:mvn/version "0.3.127"}
+        org.replikativ/kabel {:mvn/version "0.3.128"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.taoensso/telemere {:mvn/version "1.2.1"}
         missionary/missionary {:mvn/version "b.46"}
