@@ -59,13 +59,16 @@
        (swap! calls inc)
        (doto (promise-chan) (put! :ok))))
     (try
-      (put! bus-in {:type ::ds/invoke
+      ;; what kabel.remote's connection middleware puts on the bus for an
+      ;; inbound invoke
+      (put! bus-in {:type :kabel.remote/invoke
                     :scope peer-id
                     :fn-name fn-name
                     :arg-map {}
                     :request-id (random-uuid)
                     :request-scope (random-uuid)
-                    ::ds/reply-out reply-ch})
+                    :kabel.remote/dialect :kabel
+                    :kabel.remote/reply-out reply-ch})
       (is (= :ok (:result (alt!! (timeout 1000) :timeout reply-ch ([v] v)))))
       (is (= 1 @calls))
       (abort! old-supervisor)

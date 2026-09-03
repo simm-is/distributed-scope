@@ -31,7 +31,8 @@
                      (if-let [msg (<? S in)] (do (>? S in' msg) (recur)) (close! in')))
       (go-loop-super S []
                      (if-let [msg (<? S out')]
-                       (do (if (= (:type msg) :is.simm.distributed-scope/register-scope)
+                       (do (if (contains? #{:kabel.remote/register :is.simm.distributed-scope/register-scope}
+                                          (:type msg))
                              (go (<? S (timeout delay-ms)) (>? S out msg))
                              (>? S out msg))
                            (recur))

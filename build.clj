@@ -60,7 +60,9 @@
   (let [opts (jar-opts {})]
     (println "Building version:" (:version opts))
     (b/write-pom opts)
-    (b/copy-dir {:src-dirs ["resources" "src"] :target-dir class-dir})
+    ;; src only: resources/ holds the browser test page and shadow-cljs output,
+    ;; neither of which belongs in the artifact.
+    (b/copy-dir {:src-dirs ["src"] :target-dir class-dir})
     (b/jar opts)))
 
 (defn ci "Run the CI pipeline of tests (and build the JAR)." [opts]
